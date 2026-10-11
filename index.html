@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Holofractal Brane Cosmology</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;1,400&family=Work+Sans:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#04050f; --ink:#f1f2ff; --ink-soft:#c3c7ea;
+    --glass:rgba(12,14,40,.55); --line:rgba(170,180,255,.3);
+    --serif:"Cormorant Garamond","Iowan Old Style",Georgia,serif;
+    --sans:"Work Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+    box-sizing:border-box;
+    padding-top:env(safe-area-inset-top,0px);
+    padding-bottom:env(safe-area-inset-bottom,0px);
+  }
+  html { scroll-padding-top:env(safe-area-inset-top,0px); }
+  html,body { height:100%; margin:0; background:var(--bg); color:var(--ink); overflow:hidden; }
+  #stage { position:fixed; inset:0; touch-action:none; cursor:grab; }
+  #stage.dragging { cursor:grabbing; }
+  canvas { display:block; width:100%; height:100%; }
+  .title { position:fixed; left:0; top:env(safe-area-inset-top,0px); padding:26px 26px 0; max-width:min(440px,62vw); pointer-events:none; text-shadow:0 2px 22px rgba(0,0,0,.95),0 0 4px rgba(0,0,0,.6); }
+  .title h1 { font:400 clamp(1.7rem,4.4vw,2.7rem)/1.05 var(--serif); margin:0; }
+  .title p { font:italic 400 1.15rem/1.45 var(--serif); color:var(--ink-soft); margin:0; }
+  .hint { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(env(safe-area-inset-bottom,0px) + 86px); width:min(520px,90vw); text-align:center; font:italic 400 1.1rem/1.4 var(--serif); color:var(--ink); pointer-events:none; text-shadow:0 2px 18px rgba(0,0,0,.95),0 0 4px rgba(0,0,0,.6); }
+  .bar { position:fixed; left:50%; transform:translateX(-50%); bottom:calc(env(safe-area-inset-bottom,0px) + 22px); display:flex; gap:6px; padding:8px; border-radius:999px; background:var(--glass); border:1px solid var(--line); backdrop-filter:blur(10px); -webkit-backdrop-filter:blur(10px); max-width:96vw; overflow-x:auto; white-space:nowrap; }
+  .bar button { font:500 .86rem var(--sans); color:var(--ink); background:transparent; border:1px solid transparent; border-radius:999px; padding:10px 14px; cursor:pointer; }
+  .bar button:hover { background:rgba(170,180,255,.14); }
+  .bar button:focus-visible { outline:2px solid #9fb0ff; outline-offset:2px; }
+  .depth { position:fixed; right:0; top:env(safe-area-inset-top,0px); padding:26px 26px 0; text-align:right; max-width:min(240px,38vw); font:italic 400 1.2rem/1.3 var(--serif); color:var(--ink); pointer-events:none; text-shadow:0 2px 18px rgba(0,0,0,.95),0 0 4px rgba(0,0,0,.6); }
+  #fallback { position:fixed; inset:0; display:none; align-items:center; justify-content:center; text-align:center; padding:24px; font:1.3rem var(--serif); }
+</style>
+</head>
+<body>
+<div id="stage" aria-label="Infinite 3D lattice of mirror jewels. Drag to look around."></div>
+<div class="title">
+  <h1>Holofractal Brane Cosmology</h1>
+</div>
+<div class="hint" id="hint"></div>
+<div class="bar" role="toolbar" aria-label="Controls">
+  <button id="btnMode">Switch to auto-fly</button>
+  <button id="btnPause">Pause</button>
+  <button id="btnSlow">Slower</button>
+  <button id="btnFast">Faster</button>
+  <button id="btnRev">Reverse</button>
+  <button id="btnReset">Start over</button>
+</div>
+<div id="fallback">This page needs WebGL to draw the net. Try a different browser or device.</div>
+
+<script>
+(function () {
+  var stage = document.getElementById('stage');
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var canvas = document.createElement('canvas');
+  stage.appendChild(canvas);
+  var gl = canvas.getContext('webgl', { antialias:false, powerPreference:'high-performance' });
+  function fail(msg){ if (msg) console.error(msg); document.getElementById('fallback').style.display='flex'; }
+  if (!gl) { fail(); return; }
+
+  var VS = 'attribute vec2 a; void main(){ gl_Position = vec4(a,0.,1.); }';
+
+  var FS = [
+  'precision highp float;',
+  'uniform vec2 uRes; uniform vec3 uCam; uniform vec2 uLook; uniform float uTime;',
+  'uniform vec3 uRt; uniform vec3 uUp; uniform vec3 uFw;',
+  'const float S = 4.0;',      // spacing: the pattern repeats every S units, forever, along x, y and z
+  'const float R = 0.9;',      // jewel radius
+  'const float RS = 0.035;',   // strand radius
+  'const float FAR = 70.0;',
+  'const vec3 L = vec3(0.4472, 0.7155, 0.5367);',
+
+  'vec3 hash3(vec3 p){ p = fract(p*vec3(.1031,.1030,.0973)); p += dot(p, p.yxz+33.33); return fract((p.xxy+p.yxx)*p.zyx); }',
+  'vec3 hue(float h){ return clamp(abs(mod(h*6.0+vec3(0.,4.,2.),6.0)-3.0)-1.0, 0., 1.); }',
+
+  // one cell of the net, repeated infinitely: a jewel at the center, silk strands along each axis
+  'vec2 map(vec3 p){',
+  '  vec3 q = mod(p + 0.5*S, S) - 0.5*S;',
+  '  float js = length(q) - R;',
+  '  float st = min(min(length(q.yz), length(q.xz)), length(q.xy)) - RS;',
+  '  return js < st ? vec2(js, 1.0) : vec2(st, 2.0);',
+  '}',
+  'vec3 calcN(vec3 p){',
+  '  vec2 e = vec2(1.0,-1.0)*0.0015;',
+  '  return normalize(e.xyy*map(p+e.xyy).x + e.yyx*map(p+e.yyx).x + e.yxy*map(p+e.yxy).x + e.xxx*map(p+e.xxx).x);',
+  '}',
+  'vec3 sky(vec3 rd){',
+  '  float h = rd.y*0.5+0.5;',
+  '  vec3 c = mix(vec3(0.03,0.04,0.13), vec3(0.42,0.30,0.58), smoothstep(0.15,0.7,h));',
+  '  c = mix(c, vec3(1.0,0.74,0.46), smoothstep(0.68,1.0,h));',
+  '  c += vec3(1.0,0.85,0.6)*pow(max(dot(rd,L),0.0),160.0)*3.0;',
+  '  return c;',
+  '}',
+
+  'void main(){',
+  '  vec2 uv = (gl_FragCoord.xy - 0.5*uRes) / uRes.y;',
+  '  vec3 rd = normalize(uv.x*uRt + uv.y*uUp + 1.5*uFw);',
+  '  vec3 ro = uCam;',
+  '  vec3 col = vec3(0.0);',
+  '  vec3 thr = vec3(1.0);',
+
+  // follow the light through up to 6 mirror bounces: reflections of reflections
+  '  for (int b = 0; b < 6; b++) {',
+  '    float t = 0.0; float id = 0.0; bool hit = false;',
+  '    for (int i = 0; i < 100; i++) {',
+  '      vec2 m = map(ro + rd*t);',
+  '      if (m.x < 0.0015) { hit = true; id = m.y; break; }',
+  '      t += m.x*0.9;',
+  '      if (t > FAR) break;',
+  '    }',
+  '    float fog = 1.0 - exp(-min(t,FAR)*0.04);',
+  '    if (!hit) { col += thr*sky(rd); thr = vec3(0.0); break; }',
+  '    vec3 p = ro + rd*t;',
+  '    vec3 n = calcN(p);',
+  '    col += thr*fog*sky(rd)*0.85;',   // haze: the net recedes into luminous distance
+  '    thr *= (1.0 - fog);',
+  '    if (id < 1.5) {',
+  '      vec3 cell = floor((p + 0.5*S)/S);',
+  '      float h = hash3(cell).x;',
+  '      vec3 tint = mix(vec3(1.0), hue(h), 0.32) * 0.94;',
+  '      float fres = 0.82 + 0.18*pow(1.0 - max(dot(-rd,n),0.0), 3.0);',
+  '      thr *= tint * fres;',
+  '    } else {',
+  '      col += thr*vec3(0.78,0.82,1.0)*(0.18 + 0.5*max(dot(n,L),0.0));',
+  '      thr *= 0.42;',
+  '    }',
+  '    ro = p + n*0.01;',
+  '    rd = reflect(rd, n);',
+  '    if (max(thr.r,max(thr.g,thr.b)) < 0.02) break;',
+  '  }',
+
+  '  col = 1.0 - exp(-col*1.35);',
+  '  col = pow(col, vec3(0.9));',
+  '  float v = smoothstep(1.25, 0.25, length(uv));',
+  '  col *= mix(0.65, 1.0, v);',
+  '  gl_FragColor = vec4(col, 1.0);',
+  '}'
+  ].join('\n');
+
+  function compile(type, src){
+    var s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { fail(gl.getShaderInfoLog(s)); return null; }
+    return s;
+  }
+  var vs = compile(gl.VERTEX_SHADER, VS), fs = compile(gl.FRAGMENT_SHADER, FS);
+  if (!vs || !fs) return;
+  var prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { fail(gl.getProgramInfoLog(prog)); return; }
+  gl.useProgram(prog);
+
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+  var loc = gl.getAttribLocation(prog, 'a');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+  var uRes = gl.getUniformLocation(prog, 'uRes');
+  var uCam = gl.getUniformLocation(prog, 'uCam');
+  var uLook = gl.getUniformLocation(prog, 'uLook');
+  var uTime = gl.getUniformLocation(prog, 'uTime');
+
+  /* render scale adapts to the device so it stays smooth */
+  var scale = window.innerWidth < 700 ? 0.5 : 0.75;
+  var W = 0, H = 0;
+  function resize(){
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = Math.max(2, Math.floor(window.innerWidth * dpr * scale));
+    var h = Math.max(2, Math.floor(window.innerHeight * dpr * scale));
+    if (w !== W || h !== H) { W = w; H = h; canvas.width = W; canvas.height = H; gl.viewport(0,0,W,H); }
+  }
+  window.addEventListener('resize', resize); resize();
+
+  var uRt = gl.getUniformLocation(prog, 'uRt');
+  var uUp = gl.getUniformLocation(prog, 'uUp');
+  var uFw = gl.getUniformLocation(prog, 'uFw');
+
+  /* A jewel is a mirror. What it shows is the net as seen from the mirrored side. So when you reach its
+     surface you simply continue into that image: your position stays put and your view direction is
+     mirrored in the surface. The frame you see on the last instant before and the first instant after is
+     the same image, so nothing cuts. The camera basis is passed in whole because a mirrored camera is
+     left-handed. */
+  var S = 4.0, R = 0.9;
+  var START = [2.0, 2.0, 0.0];
+  var pos = START.slice();
+  var yaw = 0, pitch = 0, hs = 1, roll = 0;   // hs = -1 once mirrored an odd number of times
+  var rt = [1,0,0], up = [0,1,0], fw = [0,0,1];
+  function updateBasis(){
+    var cp = Math.cos(pitch), sp = Math.sin(pitch), cy = Math.cos(yaw), sy = Math.sin(yaw);
+    fw = [cp*sy, sp, cp*cy];
+    var r0 = [cy, 0, -sy];
+    var u0 = cross(fw, r0);
+    var r = [r0[0]*hs, r0[1]*hs, r0[2]*hs];
+    if (roll) { r = rot(r, fw, roll); u0 = rot(u0, fw, roll); }
+    rt = r; up = u0;
+  }
+  var passed = 0;
+  var BASE = 1.1;
+  var speedMul = reduceMotion ? 0 : 1;   // negative flies backward
+  var paused = reduceMotion;
+  var aim = null;
+  var mode = 'scroll';      // 'scroll': you move by scrolling / pinching; 'auto': you glide on your own
+  var pending = 0;          // distance still to travel from scrolling
+  var pts = {}, pinchLast = 0;
+  var pux = 0, puy = 0;      // where on screen (centered, height units) the pending move heads
+  function aimMove(cx, cy){ pux = (cx - window.innerWidth/2)/window.innerHeight; puy = (window.innerHeight/2 - cy)/window.innerHeight; }
+  var keys = {};
+  var T = 0;
+
+  function dot(a,b){ return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+  function cross(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+  function norm(a){ var l = Math.sqrt(dot(a,a)) || 1; return [a[0]/l, a[1]/l, a[2]/l]; }
+  function rot(v, k, a){            // rotate v about unit axis k by angle a
+    var c = Math.cos(a), sn = Math.sin(a), kv = cross(k, v), kd = dot(k, v)*(1-c);
+    return [v[0]*c + kv[0]*sn + k[0]*kd, v[1]*c + kv[1]*sn + k[1]*kd, v[2]*c + kv[2]*sn + k[2]*kd];
+  }
+  function spin(k, a){ rt = rot(rt,k,a); up = rot(up,k,a); fw = rot(fw,k,a); }
+  function reorth(){
+    fw = norm(fw);
+    var d1 = dot(rt, fw); rt = norm([rt[0]-d1*fw[0], rt[1]-d1*fw[1], rt[2]-d1*fw[2]]);
+    var d2 = dot(up, fw), d3 = dot(up, rt);
+    up = norm([up[0]-d2*fw[0]-d3*rt[0], up[1]-d2*fw[1]-d3*rt[1], up[2]-d2*fw[2]-d3*rt[2]]);
+  }
+  function mirror(v, n){ var d = 2*dot(v, n); return [v[0]-d*n[0], v[1]-d*n[1], v[2]-d*n[2]]; }
+
+  /* reaching a jewel's surface: continue into its reflection */
+  function crossSkin(){
+    var c = [Math.round(pos[0]/S)*S, Math.round(pos[1]/S)*S, Math.round(pos[2]/S)*S];
+    var d = [pos[0]-c[0], pos[1]-c[1], pos[2]-c[2]];
+    var l = Math.sqrt(dot(d,d));
+    if (l >= R) return;
+    var n = l > 1e-6 ? [d[0]/l, d[1]/l, d[2]/l] : [-fw[0], -fw[1], -fw[2]];
+    var up2 = mirror(up, n), fw2 = mirror(fw, n);
+    yaw = Math.atan2(fw2[0], fw2[2]);
+    pitch = Math.max(-1.45, Math.min(1.45, Math.asin(Math.max(-1, Math.min(1, fw2[1])))));
+    hs = -hs; roll = 0; updateBasis();
+    roll = Math.atan2(dot(cross(up, up2), fw), dot(up, up2));
+    updateBasis();
+    pos = [c[0] + n[0]*R*1.004, c[1] + n[1]*R*1.004, c[2] + n[2]*R*1.004];
+    passed++;
+  }
+
+  var down = false, lx = 0, ly = 0, moved = 0;
+  stage.addEventListener('pointerdown', function(e){ pts[e.pointerId] = { x:e.clientX, y:e.clientY }; if (Object.keys(pts).length === 2) { moved = 999; pinchLast = 0; } down = true; lx = e.clientX; ly = e.clientY; moved = 0; aim = null; stage.setPointerCapture(e.pointerId); stage.classList.add('dragging'); });
+  stage.addEventListener('pointermove', function(e){
+    if (pts[e.pointerId]) { pts[e.pointerId].x = e.clientX; pts[e.pointerId].y = e.clientY; }
+    var ids = Object.keys(pts);
+    if (ids.length === 2) {            // pinch: spread fingers to move forward, pinch to move back
+      var p1 = pts[ids[0]], p2 = pts[ids[1]];
+      var pd = Math.sqrt((p1.x-p2.x)*(p1.x-p2.x) + (p1.y-p2.y)*(p1.y-p2.y));
+      if (pinchLast && mode === 'scroll') { aimMove((p1.x+p2.x)/2, (p1.y+p2.y)/2); pending = Math.max(-12, Math.min(12, pending + (pd - pinchLast)*0.03)); }
+      pinchLast = pd; lx = e.clientX; ly = e.clientY; return;
+    }
+    if (!down) return;
+    var dx = e.clientX - lx, dy = e.clientY - ly; moved += Math.abs(dx) + Math.abs(dy);
+    yaw -= hs*dx*0.005;
+    pitch = Math.max(-1.45, Math.min(1.45, pitch + dy*0.005));
+    updateBasis();
+    lx = e.clientX; ly = e.clientY;
+  });
+  function jewelDist(o, d, maxT){   // distance along a ray to the first jewel surface, or null
+    var t = 0;
+    for (var i = 0; i < 160; i++) {
+      var px = o[0]+d[0]*t, py = o[1]+d[1]*t, pz = o[2]+d[2]*t;
+      var qx = px - Math.round(px/S)*S, qy = py - Math.round(py/S)*S, qz = pz - Math.round(pz/S)*S;
+      var ds = Math.sqrt(qx*qx + qy*qy + qz*qz) - R;
+      if (ds < 0.003) return t;
+      t += Math.max(ds*0.95, 0.003);
+      if (t > maxT) return null;
+    }
+    return null;
+  }
+  function end(e){
+    if (e) delete pts[e.pointerId];
+    if (Object.keys(pts).length < 2) pinchLast = 0;
+    if (down && moved < 6 && e && e.type === 'pointerup') {
+      var w = window.innerWidth, h = window.innerHeight;
+      var ux = (e.clientX - w/2)/h, uy = (h/2 - e.clientY)/h;
+      var dd = norm([ux*rt[0] + uy*up[0] + 1.5*fw[0], ux*rt[1] + uy*up[1] + 1.5*fw[1], ux*rt[2] + uy*up[2] + 1.5*fw[2]]);
+      if (mode === 'scroll') { aimMove(e.clientX, e.clientY); var ht = jewelDist(pos, dd, 60); pending = ht === null ? 3.5 : ht + 0.06; }
+      else aim = dd;
+    }
+    down = false; stage.classList.remove('dragging');
+  }
+  stage.addEventListener('pointerup', end); stage.addEventListener('pointercancel', end);
+  stage.addEventListener('wheel', function(e){
+    e.preventDefault();
+    var dy = e.deltaMode === 1 ? e.deltaY*16 : e.deltaY;
+    if (mode === 'scroll') { aimMove(e.clientX, e.clientY); pending = Math.max(-8, Math.min(8, pending - dy*0.005)); }
+    else { speedMul = Math.max(-3, Math.min(6, speedMul - dy*0.002)); if (speedMul !== 0) paused = false; sync(); }
+  }, { passive:false });
+  window.addEventListener('keydown', function(e){
+    var k = e.key.toLowerCase();
+    if (k === ' ') { e.preventDefault(); togglePause(); return; }
+    keys[k] = true;
+    if (['arrowup','arrowdown','arrowleft','arrowright'].indexOf(k) >= 0) e.preventDefault();
+  });
+  window.addEventListener('keyup', function(e){ keys[e.key.toLowerCase()] = false; });
+
+  var bp = document.getElementById('btnPause');
+  function sync(){ bp.textContent = (paused || speedMul===0) ? 'Resume' : 'Pause'; }
+  function togglePause(){ if (paused || speedMul===0) { paused=false; if (speedMul===0) speedMul=1; } else { paused=true; } sync(); }
+  function sgn(){ return speedMul < 0 ? -1 : 1; }
+  bp.addEventListener('click', togglePause);
+  document.getElementById('btnSlow').addEventListener('click', function(){ speedMul = sgn()*Math.max(0.15, Math.abs(speedMul)*0.6); paused=false; sync(); });
+  document.getElementById('btnFast').addEventListener('click', function(){ speedMul = sgn()*Math.min(6, Math.max(0.5, Math.abs(speedMul)*1.7)); paused=false; sync(); });
+  document.getElementById('btnRev').addEventListener('click', function(){ speedMul = speedMul === 0 ? -1 : -speedMul; paused=false; sync(); });
+  document.getElementById('btnReset').addEventListener('click', function(){
+    pos = START.slice(); yaw = 0; pitch = 0; hs = 1; roll = 0; passed = 0; aim = null; pending = 0; pux = 0; puy = 0; updateBasis();
+    if (!reduceMotion) { speedMul = 1; paused = false; }
+    sync();
+  });
+  sync();
+
+  var hintEl = document.getElementById('hint'), modeBtn = document.getElementById('btnMode');
+  var autoBtns = ['btnPause','btnSlow','btnFast','btnRev'].map(function(id){ return document.getElementById(id); });
+  function applyMode(){
+    var scrollMode = mode === 'scroll';
+    modeBtn.textContent = scrollMode ? 'Switch to auto-fly' : 'Switch to scroll & click';
+    autoBtns.forEach(function(b){ b.style.display = scrollMode ? 'none' : ''; });
+    hintEl.textContent = scrollMode
+      ? 'Scroll or click to move toward the point under the cursor, drag to look. Click a jewel to fly into it: you come out in what it was reflecting.'
+      : 'Drag to steer, tap a jewel to aim at it, and fly into it. What it was reflecting is where you come out.';
+  }
+  modeBtn.addEventListener('click', function(){
+    mode = mode === 'scroll' ? 'auto' : 'scroll'; pending = 0;
+    if (mode === 'auto' && !reduceMotion) { paused = false; if (speedMul === 0) speedMul = 1; }
+    sync(); applyMode();
+  });
+  applyMode();
+
+  var last = performance.now(), frames = 0, acc = 0;
+  function frame(now){
+    var dt = Math.min((now - last)/1000, 0.1); last = now; T += dt;
+
+    // adapt resolution
+    frames++; if (frames > 20) { acc += dt; }
+    if (frames > 80) {
+      var avg = acc / (frames - 20);
+      if (avg > 0.036 && scale > 0.3) { scale *= 0.85; resize(); }
+      else if (avg < 0.019 && scale < 1.0) { scale = Math.min(1.0, scale*1.1); resize(); }
+      frames = 0; acc = 0;
+    }
+
+    // tap-to-aim: turn smoothly toward the tapped direction
+    if (aim) {
+      var ty = Math.atan2(aim[0], aim[2]), tp = Math.asin(Math.max(-1, Math.min(1, aim[1])));
+      var dyw = ty - yaw;
+      while (dyw > Math.PI) dyw -= 2*Math.PI;
+      while (dyw < -Math.PI) dyw += 2*Math.PI;
+      var kk = 1 - Math.exp(-dt*9);
+      yaw += dyw*kk; pitch = Math.max(-1.45, Math.min(1.45, pitch + (tp - pitch)*kk));
+      if (Math.abs(dyw) < 0.002 && Math.abs(tp - pitch) < 0.002) aim = null;
+    }
+    roll *= Math.exp(-dt*3);       // the leftover tilt from a mirror crossing eases out
+    updateBasis();
+
+    var f = (mode === 'auto' && !paused) ? BASE * speedMul : 0;
+    var kf = ((keys['w']||keys['arrowup'])?1:0) - ((keys['s']||keys['arrowdown'])?1:0);
+    var kr = ((keys['d']||keys['arrowright'])?1:0) - ((keys['a']||keys['arrowleft'])?1:0);
+    var ku = (keys['e']?1:0) - (keys['q']?1:0);
+    f += kf * BASE * 1.2;
+    var sd = BASE * 1.2;
+    var mv = [(fw[0]*f + rt[0]*kr*sd + up[0]*ku*sd)*dt, (fw[1]*f + rt[1]*kr*sd + up[1]*ku*sd)*dt, (fw[2]*f + rt[2]*kr*sd + up[2]*ku*sd)*dt];
+    var pst = 0;
+    if (pending) {
+      pst = pending*(1 - Math.exp(-dt*9));
+      var cap = 10*dt; if (pst > cap) pst = cap; else if (pst < -cap) pst = -cap;
+      pending -= pst; if (Math.abs(pending) < 1e-3) pending = 0;
+    }
+    if (pst) {   // travel along the ray through the cursor, so you move toward whatever is under it
+      var dv = norm([pux*rt[0] + puy*up[0] + 1.5*fw[0], pux*rt[1] + puy*up[1] + 1.5*fw[1], pux*rt[2] + puy*up[2] + 1.5*fw[2]]);
+      mv[0] += dv[0]*pst; mv[1] += dv[1]*pst; mv[2] += dv[2]*pst;
+    }
+    var steps = Math.max(1, Math.ceil(Math.sqrt(dot(mv,mv))/0.04));
+    for (var i = 0; i < steps; i++) {
+      pos[0] += mv[0]/steps; pos[1] += mv[1]/steps; pos[2] += mv[2]/steps;
+      crossSkin();
+    }
+    for (var j = 0; j < 3; j++) { if (pos[j] > 400) pos[j] -= 400; else if (pos[j] < -400) pos[j] += 400; }
+
+    gl.uniform2f(uRes, W, H);
+    gl.uniform3f(uCam, pos[0], pos[1], pos[2]);
+    gl.uniform3f(uRt, rt[0], rt[1], rt[2]);
+    gl.uniform3f(uUp, up[0], up[1], up[2]);
+    gl.uniform3f(uFw, fw[0], fw[1], fw[2]);
+    gl.uniform1f(uTime, T);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
